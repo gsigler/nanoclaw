@@ -31,6 +31,7 @@ export interface ContainerConfig {
   additionalMounts?: AdditionalMount[];
   timeout?: number; // Default: 300000 (5 minutes)
   dockerSocket?: boolean; // Mount /var/run/docker.sock into the container
+  mcpServers?: string[]; // MCP servers to enable (e.g., ['notion'])
 }
 
 export interface RegisteredGroup {

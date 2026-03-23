@@ -42,6 +42,7 @@ export interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  imageAttachments?: Array<{ relativePath: string; mediaType: string }>;
 }
 
 export interface ContainerOutput {
@@ -147,6 +148,61 @@ function buildVolumeMounts(
     );
   }
 
+  // Mount Google credentials if google-calendar MCP is configured
+  const googleDataDir = path.join(process.cwd(), 'data', 'google');
+  if (
+    group.containerConfig?.mcpServers?.includes('google-calendar') &&
+    fs.existsSync(path.join(googleDataDir, 'gcp-oauth.keys.json'))
+  ) {
+    mounts.push({
+      hostPath: googleDataDir,
+      containerPath: '/home/node/.google-calendar-mcp',
+      readonly: false,
+    });
+  }
+
+  // Generate MCP config dynamically from .env secrets (never hardcoded)
+  if (group.containerConfig?.mcpServers?.length) {
+    const mcpSecrets = readEnvFile(['NOTION_API_KEY']);
+    const mcpServers: Record<string, unknown> = {};
+
+    for (const server of group.containerConfig.mcpServers) {
+      if (server === 'notion' && mcpSecrets.NOTION_API_KEY) {
+        mcpServers.notion = {
+          command: 'npx',
+          args: ['-y', '@notionhq/notion-mcp-server'],
+          env: {
+            OPENAPI_MCP_HEADERS: JSON.stringify({
+              Authorization: `Bearer ${mcpSecrets.NOTION_API_KEY}`,
+              'Notion-Version': '2022-06-28',
+            }),
+          },
+        };
+      }
+
+      if (server === 'google-calendar') {
+        mcpServers['google_calendar'] = {
+          command: 'npx',
+          args: ['-y', '@cocal/google-calendar-mcp'],
+          env: {
+            GOOGLE_OAUTH_CREDENTIALS:
+              '/home/node/.google-calendar-mcp/gcp-oauth.keys.json',
+            GOOGLE_CALENDAR_MCP_TOKEN_PATH:
+              '/home/node/.google-calendar-mcp/tokens.json',
+          },
+        };
+      }
+    }
+
+    if (Object.keys(mcpServers).length > 0) {
+      const mcpFile = path.join(groupSessionsDir, 'mcp.json');
+      fs.writeFileSync(
+        mcpFile,
+        JSON.stringify({ mcpServers }, null, 2) + '\n',
+      );
+    }
+  }
+
   // Sync skills from container/skills/ into each group's .claude/skills/
   const skillsSrc = path.join(process.cwd(), 'container', 'skills');
   const skillsDst = path.join(groupSessionsDir, 'skills');
@@ -240,9 +296,12 @@ function buildContainerArgs(
   }
 
   // Pass GitHub token for gh CLI and git operations
-  const envSecrets = readEnvFile(['GH_TOKEN']);
+  const envSecrets = readEnvFile(['GH_TOKEN', 'NOTION_API_KEY']);
   if (envSecrets.GH_TOKEN) {
     args.push('-e', `GH_TOKEN=${envSecrets.GH_TOKEN}`);
+  }
+  if (envSecrets.NOTION_API_KEY) {
+    args.push('-e', `NOTION_API_KEY=${envSecrets.NOTION_API_KEY}`);
   }
 
   // Runtime-specific args for host gateway resolution
@@ -271,14 +330,20 @@ function buildContainerArgs(
   return args;
 }
 
-function applyContainerConfig(
-  args: string[],
-  group: RegisteredGroup,
-): void {
+function applyContainerConfig(args: string[], group: RegisteredGroup): void {
   if (group.containerConfig?.dockerSocket) {
     // Insert before the image name (last element)
     const imageIdx = args.length - 1;
-    args.splice(imageIdx, 0, '-v', '/var/run/docker.sock:/var/run/docker.sock');
+    // Mount the socket and add the host's docker GID so the container user can access it
+    const dockerGid = fs.statSync('/var/run/docker.sock').gid;
+    args.splice(
+      imageIdx,
+      0,
+      '-v',
+      '/var/run/docker.sock:/var/run/docker.sock',
+      '--group-add',
+      String(dockerGid),
+    );
   }
 }
 

@@ -27,7 +27,18 @@ interface ContainerInput {
   isMain: boolean;
   isScheduledTask?: boolean;
   assistantName?: string;
+  imageAttachments?: Array<{ relativePath: string; mediaType: string }>;
 }
+
+interface ImageContentBlock {
+  type: 'image';
+  source: { type: 'base64'; media_type: string; data: string };
+}
+interface TextContentBlock {
+  type: 'text';
+  text: string;
+}
+type ContentBlock = ImageContentBlock | TextContentBlock;
 
 interface ContainerOutput {
   status: 'success' | 'error';
@@ -49,7 +60,7 @@ interface SessionsIndex {
 
 interface SDKUserMessage {
   type: 'user';
-  message: { role: 'user'; content: string };
+  message: { role: 'user'; content: string | ContentBlock[] };
   parent_tool_use_id: null;
   session_id: string;
 }
@@ -71,6 +82,16 @@ class MessageStream {
     this.queue.push({
       type: 'user',
       message: { role: 'user', content: text },
+      parent_tool_use_id: null,
+      session_id: '',
+    });
+    this.waiting?.();
+  }
+
+  pushMultimodal(content: ContentBlock[]): void {
+    this.queue.push({
+      type: 'user',
+      message: { role: 'user', content },
       parent_tool_use_id: null,
       session_id: '',
     });
@@ -338,7 +359,26 @@ async function runQuery(
   resumeAt?: string,
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
   const stream = new MessageStream();
-  stream.push(prompt);
+
+  // Load image attachments and send as multimodal content blocks
+  if (containerInput.imageAttachments && containerInput.imageAttachments.length > 0) {
+    const blocks: ContentBlock[] = [];
+    for (const img of containerInput.imageAttachments) {
+      const imgPath = path.join('/workspace/group', img.relativePath);
+      if (fs.existsSync(imgPath)) {
+        const data = fs.readFileSync(imgPath).toString('base64');
+        blocks.push({
+          type: 'image',
+          source: { type: 'base64', media_type: img.mediaType, data },
+        });
+        log(`Loaded image: ${img.relativePath}`);
+      }
+    }
+    blocks.push({ type: 'text', text: prompt });
+    stream.pushMultimodal(blocks);
+  } else {
+    stream.push(prompt);
+  }
 
   // Poll IPC for follow-up messages and _close sentinel during the query
   let ipcPolling = true;
@@ -389,6 +429,24 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
+  // MCP servers from mcp.json are loaded automatically via settingSources.
+  // Build allowedTools patterns for any additional MCP servers.
+  const mcpToolPatterns: string[] = ['mcp__nanoclaw__*'];
+  const userMcpFile = path.join(process.env.HOME || '/home/node', '.claude', 'mcp.json');
+  if (fs.existsSync(userMcpFile)) {
+    try {
+      const mcpData = JSON.parse(fs.readFileSync(userMcpFile, 'utf-8'));
+      if (mcpData.mcpServers) {
+        for (const name of Object.keys(mcpData.mcpServers)) {
+          mcpToolPatterns.push(`mcp__${name}__*`);
+          log(`MCP server configured: ${name}`);
+        }
+      }
+    } catch (e) {
+      log(`Failed to read mcp.json: ${e}`);
+    }
+  }
+
   for await (const message of query({
     prompt: stream,
     options: {
@@ -407,7 +465,7 @@ async function runQuery(
         'TeamCreate', 'TeamDelete', 'SendMessage',
         'TodoWrite', 'ToolSearch', 'Skill',
         'NotebookEdit',
-        'mcp__nanoclaw__*'
+        ...mcpToolPatterns
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
