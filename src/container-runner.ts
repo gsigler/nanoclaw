@@ -26,6 +26,7 @@ import {
   stopContainer,
 } from './container-runtime.js';
 import { detectAuthMode } from './credential-proxy.js';
+import { readEnvFile } from './env.js';
 import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
@@ -238,6 +239,12 @@ function buildContainerArgs(
     args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
   }
 
+  // Pass GitHub token for gh CLI and git operations
+  const envSecrets = readEnvFile(['GH_TOKEN']);
+  if (envSecrets.GH_TOKEN) {
+    args.push('-e', `GH_TOKEN=${envSecrets.GH_TOKEN}`);
+  }
+
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
 
@@ -264,6 +271,17 @@ function buildContainerArgs(
   return args;
 }
 
+function applyContainerConfig(
+  args: string[],
+  group: RegisteredGroup,
+): void {
+  if (group.containerConfig?.dockerSocket) {
+    // Insert before the image name (last element)
+    const imageIdx = args.length - 1;
+    args.splice(imageIdx, 0, '-v', '/var/run/docker.sock:/var/run/docker.sock');
+  }
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
@@ -279,6 +297,7 @@ export async function runContainerAgent(
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName);
+  applyContainerConfig(containerArgs, group);
 
   logger.debug(
     {
