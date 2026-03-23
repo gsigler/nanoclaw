@@ -429,15 +429,17 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
-  // MCP servers from mcp.json are loaded automatically via settingSources.
-  // Build allowedTools patterns for any additional MCP servers.
+  // Load MCP servers from mcp.json and merge into query() options.
+  // settingSources alone doesn't reliably load all server types (e.g. remote HTTP).
+  const userMcpConfig: Record<string, unknown> = {};
   const mcpToolPatterns: string[] = ['mcp__nanoclaw__*'];
   const userMcpFile = path.join(process.env.HOME || '/home/node', '.claude', 'mcp.json');
   if (fs.existsSync(userMcpFile)) {
     try {
       const mcpData = JSON.parse(fs.readFileSync(userMcpFile, 'utf-8'));
       if (mcpData.mcpServers) {
-        for (const name of Object.keys(mcpData.mcpServers)) {
+        for (const [name, config] of Object.entries(mcpData.mcpServers)) {
+          userMcpConfig[name] = config;
           mcpToolPatterns.push(`mcp__${name}__*`);
           log(`MCP server configured: ${name}`);
         }
@@ -481,6 +483,7 @@ async function runQuery(
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
+        ...userMcpConfig,
       },
       hooks: {
         PreCompact: [{ hooks: [createPreCompactHook(containerInput.assistantName)] }],

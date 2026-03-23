@@ -163,7 +163,7 @@ function buildVolumeMounts(
 
   // Generate MCP config dynamically from .env secrets (never hardcoded)
   if (group.containerConfig?.mcpServers?.length) {
-    const mcpSecrets = readEnvFile(['NOTION_API_KEY']);
+    const mcpSecrets = readEnvFile(['NOTION_API_KEY', 'TENDY_API_KEY']);
     const mcpServers: Record<string, unknown> = {};
 
     for (const server of group.containerConfig.mcpServers) {
@@ -177,6 +177,19 @@ function buildVolumeMounts(
               'Notion-Version': '2022-06-28',
             }),
           },
+        };
+      }
+
+      if (server === 'tendy' && mcpSecrets.TENDY_API_KEY) {
+        mcpServers.tendy = {
+          command: 'npx',
+          args: [
+            '-y',
+            'mcp-remote',
+            'https://tendy.up.railway.app/mcp',
+            `--header`,
+            `Authorization: Bearer ${mcpSecrets.TENDY_API_KEY}`,
+          ],
         };
       }
 
