@@ -1,7 +1,12 @@
 # NanoClaw Agent Container
 # Runs Claude Agent SDK in isolated Linux VM with browser automation
 
+FROM docker:cli AS docker-cli
+
 FROM node:22-slim
+
+# Copy just the Docker CLI binary (no daemon/containerd/runc)
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
 # Install system dependencies for Chromium
 RUN apt-get update && apt-get install -y \
@@ -24,14 +29,16 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
+    gh \
+    jq \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install agent-browser and claude-code globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code
+# Install agent-browser, claude-code, and pnpm globally
+RUN npm install -g agent-browser @anthropic-ai/claude-code pnpm@9.15.4
 
 # Create app directory
 WORKDIR /app
