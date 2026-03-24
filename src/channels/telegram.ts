@@ -1,5 +1,5 @@
 import https from 'https';
-import { Api, Bot } from 'grammy';
+import { Api, Bot, InlineKeyboard } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
@@ -18,6 +18,11 @@ export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  onTaskAction?: (
+    taskId: string,
+    action: 'done' | 'snooze',
+    snoozeMs?: number,
+  ) => Promise<void>;
 }
 
 /**
@@ -277,6 +282,31 @@ export class TelegramChannel implements Channel {
     this.bot.on('message:location', (ctx) => storeNonText(ctx, '[Location]'));
     this.bot.on('message:contact', (ctx) => storeNonText(ctx, '[Contact]'));
 
+    // Handle inline button callbacks (task done/snooze)
+    this.bot.on('callback_query:data', async (ctx) => {
+      const data = ctx.callbackQuery.data;
+
+      if (data.startsWith('task_done:')) {
+        const taskId = data.slice('task_done:'.length);
+        await this.opts.onTaskAction?.(taskId, 'done');
+        await ctx.answerCallbackQuery({ text: 'Done!' });
+        await ctx
+          .editMessageReplyMarkup({ reply_markup: undefined })
+          .catch(() => {});
+      } else if (data.startsWith('task_snooze:')) {
+        const parts = data.split(':');
+        const taskId = parts[1];
+        const ms = parseInt(parts[2], 10);
+        await this.opts.onTaskAction?.(taskId, 'snooze', ms);
+        await ctx.answerCallbackQuery({ text: 'Snoozed!' });
+        await ctx
+          .editMessageReplyMarkup({ reply_markup: undefined })
+          .catch(() => {});
+      } else {
+        await ctx.answerCallbackQuery();
+      }
+    });
+
     // Handle errors gracefully
     this.bot.catch((err) => {
       logger.error({ err: err.message }, 'Telegram bot error');
@@ -308,6 +338,27 @@ export class TelegramChannel implements Channel {
 
     try {
       const numericId = jid.replace(/^tg:/, '');
+
+      // Check for JSON-encoded message with inline buttons
+      if (text.startsWith('{')) {
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed.text && Array.isArray(parsed.buttons)) {
+            const keyboard = new InlineKeyboard();
+            for (const btn of parsed.buttons) {
+              keyboard.text(btn.text, btn.data);
+            }
+            await this.bot.api.sendMessage(numericId, parsed.text, {
+              reply_markup: keyboard,
+              parse_mode: 'Markdown',
+            });
+            logger.info({ jid }, 'Telegram message sent with inline buttons');
+            return;
+          }
+        } catch {
+          // Not valid JSON or missing fields — fall through to normal send
+        }
+      }
 
       // Telegram has a 4096 character limit per message — split if needed
       const MAX_LENGTH = 4096;

@@ -9,6 +9,11 @@ export interface ChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  onTaskAction?: (
+    taskId: string,
+    action: 'done' | 'snooze',
+    snoozeMs?: number,
+  ) => Promise<void>;
 }
 
 export type ChannelFactory = (opts: ChannelOpts) => Channel | null;

@@ -31,6 +31,7 @@ import {
   getAllRegisteredGroups,
   getAllSessions,
   getAllTasks,
+  getTaskById,
   getMessagesSince,
   getNewMessages,
   getRouterState,
@@ -40,6 +41,7 @@ import {
   setSession,
   storeChatMetadata,
   storeMessage,
+  updateTask,
 } from './db.js';
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
@@ -577,6 +579,31 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
+    onTaskAction: async (
+      taskId: string,
+      action: 'done' | 'snooze',
+      snoozeMs?: number,
+    ) => {
+      const task = getTaskById(taskId);
+      if (!task) return;
+
+      if (action === 'done') {
+        if (task.schedule_type === 'interval') {
+          // Reschedule from now (maintenance pattern)
+          const ms = parseInt(task.schedule_value, 10);
+          const nextRun = new Date(Date.now() + ms).toISOString();
+          updateTask(taskId, { next_run: nextRun });
+          logger.info({ taskId }, 'Task marked done, rescheduled from now');
+        } else {
+          updateTask(taskId, { status: 'completed', next_run: null });
+          logger.info({ taskId }, 'Task marked done');
+        }
+      } else if (action === 'snooze' && snoozeMs) {
+        const nextRun = new Date(Date.now() + snoozeMs).toISOString();
+        updateTask(taskId, { next_run: nextRun });
+        logger.info({ taskId, snoozeMs }, 'Task snoozed');
+      }
+    },
   };
 
   // Create and connect all registered channels.
