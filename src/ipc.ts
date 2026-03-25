@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { CronExpressionParser } from 'cron-parser';
+import { z } from 'zod/v4';
 
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
@@ -9,6 +10,41 @@ import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
+
+/** IPC message schemas — reject malformed files before processing */
+const ipcMessageSchema = z.object({
+  type: z.literal('message'),
+  chatJid: z.string(),
+  text: z.string(),
+});
+
+const ipcTaskTypes = [
+  'schedule_task',
+  'pause_task',
+  'resume_task',
+  'cancel_task',
+  'update_task',
+  'refresh_groups',
+  'register_group',
+] as const;
+
+const ipcTaskSchema = z.object({
+  type: z.enum(ipcTaskTypes),
+  taskId: z.string().optional(),
+  prompt: z.string().optional(),
+  schedule_type: z.string().optional(),
+  schedule_value: z.string().optional(),
+  context_mode: z.string().optional(),
+  groupFolder: z.string().optional(),
+  chatJid: z.string().optional(),
+  targetJid: z.string().optional(),
+  jid: z.string().optional(),
+  name: z.string().optional(),
+  folder: z.string().optional(),
+  trigger: z.string().optional(),
+  requiresTrigger: z.boolean().optional(),
+  containerConfig: z.record(z.string(), z.unknown()).optional(),
+});
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -73,8 +109,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
           for (const file of messageFiles) {
             const filePath = path.join(messagesDir, file);
             try {
-              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              if (data.type === 'message' && data.chatJid && data.text) {
+              const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              const parsed = ipcMessageSchema.safeParse(raw);
+              if (parsed.success) {
+                const data = parsed.data;
                 // Authorization: verify this group can send to this chatJid
                 const targetGroup = registeredGroups[data.chatJid];
                 if (
@@ -92,6 +130,11 @@ export function startIpcWatcher(deps: IpcDeps): void {
                     'Unauthorized IPC message attempt blocked',
                   );
                 }
+              } else {
+                logger.warn(
+                  { file, sourceGroup, error: parsed.error.message },
+                  'IPC message failed schema validation',
+                );
               }
               fs.unlinkSync(filePath);
             } catch (err) {
@@ -124,9 +167,18 @@ export function startIpcWatcher(deps: IpcDeps): void {
           for (const file of taskFiles) {
             const filePath = path.join(tasksDir, file);
             try {
-              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              const raw = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              const parsed = ipcTaskSchema.safeParse(raw);
+              if (!parsed.success) {
+                logger.warn(
+                  { file, sourceGroup, error: parsed.error.message },
+                  'IPC task failed schema validation',
+                );
+                fs.unlinkSync(filePath);
+                continue;
+              }
               // Pass source group identity to processTaskIpc for authorization
-              await processTaskIpc(data, sourceGroup, isMain, deps);
+              await processTaskIpc(parsed.data, sourceGroup, isMain, deps);
               fs.unlinkSync(filePath);
             } catch (err) {
               logger.error(

@@ -53,6 +53,11 @@ export const CREDENTIAL_PROXY_PORT = parseInt(
 );
 export const IPC_POLL_INTERVAL = 1000;
 export const IDLE_TIMEOUT = parseInt(process.env.IDLE_TIMEOUT || '1800000', 10); // 30min default — how long to keep container alive after last result
+export const RATE_LIMIT_WINDOW_MS = 60_000; // 1 minute sliding window
+export const RATE_LIMIT_MAX_INVOCATIONS = parseInt(
+  process.env.RATE_LIMIT_MAX || '10',
+  10,
+); // max container invocations per group per window
 export const MAX_CONCURRENT_CONTAINERS = Math.max(
   1,
   parseInt(process.env.MAX_CONCURRENT_CONTAINERS || '5', 10) || 5,

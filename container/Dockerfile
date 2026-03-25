@@ -45,7 +45,7 @@ ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
 # Install agent-browser, claude-code, and pnpm globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code pnpm@9.15.4
+RUN npm install -g agent-browser@0.22.3 @anthropic-ai/claude-code@2.1.83 pnpm@9.15.4
 
 # Create app directory
 WORKDIR /app
@@ -70,7 +70,7 @@ RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/
 # Credentials are injected by the host's credential proxy — never passed here.
 # Follow-up messages arrive via IPC files in /workspace/ipc/input/
 # Pre-install MCP packages to avoid npx download on each container start
-RUN npm install -g @notionhq/notion-mcp-server @cocal/google-calendar-mcp mcp-remote
+RUN npm install -g @notionhq/notion-mcp-server@2.2.1 @cocal/google-calendar-mcp@2.6.1 mcp-remote@0.1.38
 
 RUN printf '#!/bin/bash\nset -e\ncd /app && npx tsc --outDir /tmp/dist 2>&1 >&2\nln -s /app/node_modules /tmp/dist/node_modules\nchmod -R a-w /tmp/dist\ncat > /tmp/input.json\nnode /tmp/dist/index.js < /tmp/input.json\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 

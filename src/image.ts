@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import sharp from 'sharp';
@@ -33,7 +34,7 @@ export async function processImage(
   const attachDir = path.join(groupDir, 'attachments');
   fs.mkdirSync(attachDir, { recursive: true });
 
-  const filename = `img-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.jpg`;
+  const filename = `img-${Date.now()}-${crypto.randomBytes(4).toString('hex')}.jpg`;
   const filePath = path.join(attachDir, filename);
   fs.writeFileSync(filePath, resized);
 

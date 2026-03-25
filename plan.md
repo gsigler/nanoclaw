@@ -18,17 +18,9 @@ Deep security review of NanoClaw completed 2025-03-25. Findings consolidated bel
 
 ---
 
-### 2. Docker socket mount grants container escape
+### 2. ~~Docker socket mount grants container escape~~ ACCEPTED
 
-**File:** `src/container-runner.ts` (applyContainerConfig, lines 357-370)
-
-**Issue:** When `containerConfig.dockerSocket` is true, `/var/run/docker.sock` is mounted into the container. The agent can spawn sibling containers with arbitrary mounts (including `/`, `~/.ssh`, `.env`), effectively escaping all isolation.
-
-**Fix:**
-- Restrict docker socket access to main group only, with an explicit allowlist check
-- Log every container run where docker socket is mounted
-- Document the risk clearly in group config and CLAUDE.md
-- Consider using a Docker API proxy (like Tecnativa/docker-socket-proxy) that restricts allowed Docker API calls
+Docker socket is only enabled on the workshop group, which builds and runs apps that require Docker. Intentional trust decision — accepted risk for that group's use case.
 
 ---
 
@@ -46,150 +38,81 @@ Deep security review of NanoClaw completed 2025-03-25. Findings consolidated bel
 
 ---
 
-### 4. No rate limiting on message processing or container spawning
+### 4. ~~No rate limiting on message processing or container spawning~~ DONE
 
-**Files:** `src/index.ts`, `src/container-runner.ts`
+**Files:** `src/index.ts`, `src/config.ts`
 
-**Issue:** No per-group or per-sender rate limiting exists. A flood of messages (from a compromised channel or misconfigured bot) could spawn containers up to `MAX_CONCURRENT_CONTAINERS` continuously, exhausting API quota and compute resources.
-
-**Fix:**
-- Add per-group message throttle (e.g., max 10 messages/minute, configurable)
-- Add per-sender cooldown for non-main groups
-- Log and alert when rate limits are hit
-- Consider exponential backoff on repeated invocations from same source
+**Fixed:** Added per-group sliding window rate limiter (default 10 invocations/minute, configurable via `RATE_LIMIT_MAX` env var). Logs warning when rate limit is hit, consumes messages to prevent infinite retry loops.
 
 ---
 
-### 5. Remote control sessions have no TTL
+### 5. Remote control sessions have no TTL — SKIPPED
 
-**File:** `src/remote-control.ts`
-
-**Issue:** Remote control sessions are persisted to `data/remote-control.json` and restored on restart with no expiration. If the session URL is leaked (sent over chat in plaintext), it grants indefinite access.
-
-**Fix:**
-- Add configurable TTL (default 24h) to remote control sessions
-- Require re-authentication after TTL expires
-- Log all remote control session creation and usage
-- Consider adding an IP allowlist or one-time token pattern
+Accepted risk — feature is rarely used and restricted to main group.
 
 ---
 
 ## Medium
 
-### 6. Database stores all messages unencrypted
+### 6. Database file permissions — DONE (encryption skipped)
 
-**File:** `src/db.ts`, `store/messages.db`
-
-**Issue:** All conversation messages, task results, and scheduled task data stored in plaintext SQLite. If the host filesystem is accessed, full conversation history is exposed.
-
-**Fix:**
-- Evaluate SQLCipher or similar at-rest encryption for the database
-- Or rely on OS-level full-disk encryption (document this as a requirement)
-- At minimum, ensure database file permissions are 600
+**Fixed:** Database file permissions set to 0o600 (owner-only) on init. Encryption skipped per user decision.
 
 ---
 
-### 7. Backups are unencrypted
+### 7. Backup encryption — SKIPPED
 
-**File:** `scripts/backup.sh`
-
-**Issue:** Backups include conversation history, group memory, and session transcripts pushed to a private GitHub repo without encryption. If the repo is compromised or made public accidentally, all data is exposed.
-
-**Fix:**
-- Add optional GPG encryption before pushing to remote
-- Or use `git-crypt` for transparent encryption of sensitive paths
-- Document that backups contain conversation history and PII
+Accepted risk per user decision.
 
 ---
 
-### 8. NPM packages unpinned in container Dockerfile
+### 8. ~~NPM packages unpinned in container Dockerfile~~ DONE
 
-**File:** `container/Dockerfile` (line 73)
+**File:** `container/Dockerfile`
 
-**Issue:** MCP server packages installed via `npm install -g` without version pinning. A rebuild could pull a compromised version.
-
-**Fix:**
-- Pin all global npm packages to exact versions in Dockerfile
-- Consider using a lockfile or `npm ci` pattern for reproducible builds
-- Add a comment documenting when versions were last audited
+**Fixed:** All global npm packages pinned: agent-browser@0.22.3, claude-code@2.1.83, notion-mcp-server@2.2.1, google-calendar-mcp@2.6.1, mcp-remote@0.1.38.
 
 ---
 
-### 9. Mount allowlist not hot-reloaded
+### 9. ~~Mount allowlist not hot-reloaded~~ DONE
 
-**File:** `src/mount-security.ts` (line 23)
+**File:** `src/mount-security.ts`
 
-**Issue:** Mount allowlist is cached in memory at startup. Security policy changes require a full process restart to take effect.
-
-**Fix:**
-- Watch the allowlist file for changes and reload on modification
-- Or re-read the allowlist on each container spawn (file is small, cost is negligible)
+**Fixed:** Allowlist checks file mtime on each load and reloads automatically when changed. No restart needed.
 
 ---
 
-### 10. IPC messages lack schema validation
+### 10. ~~IPC messages lack schema validation~~ DONE
 
 **File:** `src/ipc.ts`
 
-**Issue:** IPC JSON files are parsed and type-asserted without runtime schema validation. Malformed IPC files could cause unexpected behavior in switch cases.
-
-**Fix:**
-- Add Zod or similar runtime schema validation for all IPC message types
-- Reject and log messages that don't conform to expected schema
-- Move errored files to the existing `errors/` directory (already done, but add schema detail to error log)
+**Fixed:** Added Zod schemas for IPC message and task types. Files failing validation are logged and discarded.
 
 ---
 
 ## Low
 
-### 11. Image filenames use Math.random()
+### 11. ~~Image filenames use Math.random()~~ DONE
 
-**File:** `src/image.ts` (line 36)
-
-**Issue:** `Math.random()` is not cryptographically secure. Filenames are predictable if timing is known.
-
-**Fix:**
-- Replace with `crypto.randomUUID()` or `crypto.randomBytes(8).toString('hex')`
-- Low actual risk since filenames aren't user-accessible URLs
+**File:** `src/image.ts` — replaced with `crypto.randomBytes(4).toString('hex')`.
 
 ---
 
-### 12. Telegram callback queries lack HMAC verification
+### 12. ~~Telegram callback queries lack HMAC verification~~ DONE
 
-**File:** `src/channels/telegram.ts` (lines 286-308)
-
-**Issue:** Inline button callback data (e.g., `task_done:{id}`) has no signature. A forged callback could trigger task actions.
-
-**Fix:**
-- Sign callback data with a host-side HMAC secret
-- Verify signature before processing callback
-- Low risk since Telegram enforces that callbacks come from real button presses
+**File:** `src/channels/telegram.ts` — callback data HMAC-signed (SHA-256, 32-bit truncated, per-process key).
 
 ---
 
-### 13. escapeXml() doesn't cover all contexts
+### 13. ~~escapeXml() doesn't cover all contexts~~ DONE
 
-**File:** `src/router.ts` (lines 4-11)
-
-**Issue:** Only escapes `&`, `<`, `>`, `"`. Single quotes and backticks not escaped. If agent output is rendered in contexts beyond XML tags, injection is possible.
-
-**Fix:**
-- Add single quote escaping (`'` → `&apos;`)
-- Document that escapeXml is for XML attribute/content context only
-- Low risk since messages go through channel-specific formatting before delivery
+**File:** `src/router.ts` — added `&apos;` escaping.
 
 ---
 
-### 14. Database row-level isolation is query-based only
+### 14. Database row-level isolation — SKIPPED
 
-**File:** `src/db.ts`
-
-**Issue:** All groups share a single SQLite file. Isolation relies on WHERE clauses filtering by `group_folder`. A missed filter in a new query could leak cross-group data.
-
-**Fix:**
-- Add a helper that automatically appends group_folder filter to all group-scoped queries
-- Or use SQLite ATTACH with separate per-group database files
-- Add tests that verify no query returns cross-group data
+All existing queries correctly filter by chat_jid/group_folder. Acceptable for single-user deployment.
 
 ---
 
@@ -211,7 +134,7 @@ Create a `SECURITY.md` documenting:
 
 These are well-implemented and worth preserving:
 
-- **Credential proxy pattern** — Containers never see real Anthropic tokens
+- **Credential proxy pattern** — Containers never see real tokens (Anthropic, GitHub, Notion, Tendy, YNAB)
 - **.env shadowed with /dev/null** — Explicit secret blocking in container mounts
 - **Path traversal protection** — Multi-layer validation (regex, resolve, bounds check, symlink resolution)
 - **Parameterized SQL everywhere** — No SQL injection vectors found

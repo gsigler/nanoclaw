@@ -19,8 +19,9 @@ const logger = pino({
   transport: { target: 'pino-pretty', options: { colorize: true } },
 });
 
-// Cache the allowlist in memory - only reloads on process restart
+// Cache the allowlist in memory — reloads automatically when file changes
 let cachedAllowlist: MountAllowlist | null = null;
+let cachedAllowlistMtime: number = 0;
 let allowlistLoadError: string | null = null;
 
 /**
@@ -52,12 +53,28 @@ const DEFAULT_BLOCKED_PATTERNS = [
  * Result is cached in memory for the lifetime of the process.
  */
 export function loadMountAllowlist(): MountAllowlist | null {
-  if (cachedAllowlist !== null) {
-    return cachedAllowlist;
+  // Hot-reload: check file mtime and invalidate cache if changed
+  try {
+    const stat = fs.statSync(MOUNT_ALLOWLIST_PATH);
+    if (cachedAllowlist !== null && stat.mtimeMs === cachedAllowlistMtime) {
+      return cachedAllowlist;
+    }
+    // File changed or first load — reset and re-read below
+    if (cachedAllowlist !== null) {
+      logger.info('Mount allowlist file changed, reloading');
+    }
+    cachedAllowlist = null;
+    allowlistLoadError = null;
+  } catch {
+    // File doesn't exist — fall through to the existing not-found handling
+    if (cachedAllowlist !== null) {
+      // Was loaded before but now deleted — invalidate
+      cachedAllowlist = null;
+      cachedAllowlistMtime = 0;
+    }
   }
 
   if (allowlistLoadError !== null) {
-    // Already tried and failed, don't spam logs
     return null;
   }
 
@@ -95,6 +112,11 @@ export function loadMountAllowlist(): MountAllowlist | null {
     allowlist.blockedPatterns = mergedBlockedPatterns;
 
     cachedAllowlist = allowlist;
+    try {
+      cachedAllowlistMtime = fs.statSync(MOUNT_ALLOWLIST_PATH).mtimeMs;
+    } catch {
+      cachedAllowlistMtime = 0;
+    }
     logger.info(
       {
         path: MOUNT_ALLOWLIST_PATH,

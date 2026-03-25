@@ -6,6 +6,8 @@ import {
   CREDENTIAL_PROXY_PORT,
   IDLE_TIMEOUT,
   POLL_INTERVAL,
+  RATE_LIMIT_MAX_INVOCATIONS,
+  RATE_LIMIT_WINDOW_MS,
   TIMEZONE,
   TRIGGER_PATTERN,
 } from './config.js';
@@ -146,6 +148,22 @@ export function _setRegisteredGroups(
   registeredGroups = groups;
 }
 
+// Per-group rate limiter: tracks invocation timestamps in a sliding window
+const groupInvocationLog = new Map<string, number[]>();
+
+function isRateLimited(chatJid: string): boolean {
+  const now = Date.now();
+  const log = groupInvocationLog.get(chatJid) || [];
+  // Evict entries outside the window
+  const recent = log.filter((ts) => now - ts < RATE_LIMIT_WINDOW_MS);
+  groupInvocationLog.set(chatJid, recent);
+  if (recent.length >= RATE_LIMIT_MAX_INVOCATIONS) {
+    return true;
+  }
+  recent.push(now);
+  return false;
+}
+
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
@@ -158,6 +176,15 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   if (!channel) {
     logger.warn({ chatJid }, 'No channel owns JID, skipping messages');
     return true;
+  }
+
+  // Rate limit: prevent runaway container spawning from message floods
+  if (isRateLimited(chatJid)) {
+    logger.warn(
+      { chatJid, group: group.name, limit: RATE_LIMIT_MAX_INVOCATIONS },
+      'Rate limited — too many invocations in window',
+    );
+    return true; // Consume messages to prevent infinite retry
   }
 
   const isMainGroup = group.isMain === true;

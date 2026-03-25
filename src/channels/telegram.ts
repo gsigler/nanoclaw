@@ -1,8 +1,37 @@
+import crypto from 'crypto';
 import https from 'https';
 import { Api, Bot, InlineKeyboard } from 'grammy';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
+
+// HMAC key for signing inline button callback data (generated per process)
+const CALLBACK_HMAC_KEY = crypto.randomBytes(32);
+
+function signCallbackData(data: string): string {
+  const sig = crypto
+    .createHmac('sha256', CALLBACK_HMAC_KEY)
+    .update(data)
+    .digest('hex')
+    .slice(0, 8); // 8 hex chars = 32 bits, enough to prevent forgery
+  return `${data}:${sig}`;
+}
+
+function verifyCallbackData(signed: string): string | null {
+  const lastColon = signed.lastIndexOf(':');
+  if (lastColon === -1) return null;
+  const data = signed.slice(0, lastColon);
+  const sig = signed.slice(lastColon + 1);
+  const expected = crypto
+    .createHmac('sha256', CALLBACK_HMAC_KEY)
+    .update(data)
+    .digest('hex')
+    .slice(0, 8);
+  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
+    return null;
+  }
+  return data;
+}
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { processImage } from '../image.js';
 import { logger } from '../logger.js';
@@ -282,9 +311,16 @@ export class TelegramChannel implements Channel {
     this.bot.on('message:location', (ctx) => storeNonText(ctx, '[Location]'));
     this.bot.on('message:contact', (ctx) => storeNonText(ctx, '[Contact]'));
 
-    // Handle inline button callbacks (task done/snooze)
+    // Handle inline button callbacks (task done/snooze) with HMAC verification
     this.bot.on('callback_query:data', async (ctx) => {
-      const data = ctx.callbackQuery.data;
+      const raw = ctx.callbackQuery.data;
+      const data = verifyCallbackData(raw);
+
+      if (!data) {
+        logger.warn({ raw }, 'Callback query failed HMAC verification');
+        await ctx.answerCallbackQuery({ text: 'Invalid callback' });
+        return;
+      }
 
       if (data.startsWith('task_done:')) {
         const taskId = data.slice('task_done:'.length);
@@ -346,7 +382,7 @@ export class TelegramChannel implements Channel {
           if (parsed.text && Array.isArray(parsed.buttons)) {
             const keyboard = new InlineKeyboard();
             for (const btn of parsed.buttons) {
-              keyboard.text(btn.text, btn.data);
+              keyboard.text(btn.text, signCallbackData(btn.data));
             }
             await this.bot.api.sendMessage(numericId, parsed.text, {
               reply_markup: keyboard,

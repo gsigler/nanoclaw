@@ -146,6 +146,12 @@ export function initDatabase(): void {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
   db = new Database(dbPath);
+  // Restrict DB file to owner-only (contains conversation history)
+  try {
+    fs.chmodSync(dbPath, 0o600);
+  } catch {
+    /* may fail on some filesystems */
+  }
   createSchema(db);
 
   // Migrate from JSON files if they exist
