@@ -31,7 +31,14 @@ RUN apt-get update && apt-get install -y \
     git \
     gh \
     jq \
+    python3 \
+    python3-venv \
     && rm -rf /var/lib/apt/lists/*
+
+# Install uv (Python package manager, needed for Python-based MCP servers)
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    cp /root/.local/bin/uv /usr/local/bin/uv && \
+    cp /root/.local/bin/uvx /usr/local/bin/uvx
 
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
