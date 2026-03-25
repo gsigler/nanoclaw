@@ -34,6 +34,87 @@ import { RegisteredGroup } from './types.js';
 const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
 const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
 
+/**
+ * Write credential wrapper scripts to the group's IPC bin directory.
+ * These scripts fetch tokens from the credential proxy on-demand so
+ * secrets never appear in container env vars or files (mcp.json, .env).
+ *
+ * The proxy URL is resolved at runtime via $NANOCLAW_PROXY_URL env var.
+ */
+function writeCredentialWrappers(groupIpcDir: string): void {
+  const binDir = path.join(groupIpcDir, 'bin');
+  fs.mkdirSync(binDir, { recursive: true });
+
+  // gh CLI wrapper — fetches GH_TOKEN from proxy per-invocation
+  fs.writeFileSync(
+    path.join(binDir, 'gh'),
+    [
+      '#!/bin/bash',
+      'export GH_TOKEN=$(curl -sf "$NANOCLAW_PROXY_URL/_cred/github-token")',
+      'exec /usr/bin/gh "$@"',
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+
+  // Git credential helper — provides GitHub token for git push/clone
+  fs.writeFileSync(
+    path.join(binDir, 'git-credential-nanoclaw'),
+    [
+      '#!/bin/bash',
+      'if [ "$1" = "get" ]; then',
+      '  while IFS= read -r line; do [[ -z "$line" ]] && break; done',
+      '  TOKEN=$(curl -sf "$NANOCLAW_PROXY_URL/_cred/github-token")',
+      '  [ -n "$TOKEN" ] && printf "protocol=https\\nhost=github.com\\nusername=x-access-token\\npassword=%s\\n" "$TOKEN"',
+      'fi',
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+
+  // Git config that uses our credential helper
+  fs.writeFileSync(
+    path.join(binDir, '.gitconfig'),
+    '[credential]\n    helper = /workspace/ipc/bin/git-credential-nanoclaw\n',
+  );
+
+  // Notion MCP wrapper — fetches OPENAPI_MCP_HEADERS from proxy
+  fs.writeFileSync(
+    path.join(binDir, 'notion-mcp-auth'),
+    [
+      '#!/bin/bash',
+      'export OPENAPI_MCP_HEADERS=$(curl -sf "$NANOCLAW_PROXY_URL/_cred/notion-headers")',
+      'exec npx -y @notionhq/notion-mcp-server',
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+
+  // Tendy MCP wrapper — fetches auth header from proxy
+  fs.writeFileSync(
+    path.join(binDir, 'tendy-mcp-auth'),
+    [
+      '#!/bin/bash',
+      'HEADER=$(curl -sf "$NANOCLAW_PROXY_URL/_cred/tendy-header")',
+      'exec npx -y mcp-remote https://tendy.up.railway.app/mcp --header "Authorization: $HEADER"',
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+
+  // YNAB MCP wrapper — fetches YNAB_PAT from proxy
+  fs.writeFileSync(
+    path.join(binDir, 'ynab-mcp-auth'),
+    [
+      '#!/bin/bash',
+      'export YNAB_PAT=$(curl -sf "$NANOCLAW_PROXY_URL/_cred/ynab-token")',
+      'exec uvx --with ynab==1.2.0 ynab-mcp-server',
+      '',
+    ].join('\n'),
+    { mode: 0o755 },
+  );
+}
+
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
@@ -161,35 +242,37 @@ function buildVolumeMounts(
     });
   }
 
-  // Generate MCP config dynamically from .env secrets (never hardcoded)
+  // Generate MCP config using credential wrapper scripts.
+  // Tokens are fetched from the credential proxy at MCP server startup,
+  // never written to mcp.json or passed as env vars.
   if (group.containerConfig?.mcpServers?.length) {
-    const mcpSecrets = readEnvFile(['NOTION_API_KEY', 'TENDY_API_KEY']);
+    // Check which secrets exist (values stay in the proxy, not here)
+    const mcpSecretAvailability = readEnvFile([
+      'NOTION_API_KEY',
+      'TENDY_API_KEY',
+      'YNAB_API_TOKEN',
+    ]);
     const mcpServers: Record<string, unknown> = {};
 
     for (const server of group.containerConfig.mcpServers) {
-      if (server === 'notion' && mcpSecrets.NOTION_API_KEY) {
+      if (server === 'notion' && mcpSecretAvailability.NOTION_API_KEY) {
         mcpServers.notion = {
-          command: 'npx',
-          args: ['-y', '@notionhq/notion-mcp-server'],
-          env: {
-            OPENAPI_MCP_HEADERS: JSON.stringify({
-              Authorization: `Bearer ${mcpSecrets.NOTION_API_KEY}`,
-              'Notion-Version': '2022-06-28',
-            }),
-          },
+          command: '/workspace/ipc/bin/notion-mcp-auth',
+          args: [],
         };
       }
 
-      if (server === 'tendy' && mcpSecrets.TENDY_API_KEY) {
+      if (server === 'tendy' && mcpSecretAvailability.TENDY_API_KEY) {
         mcpServers.tendy = {
-          command: 'npx',
-          args: [
-            '-y',
-            'mcp-remote',
-            'https://tendy.up.railway.app/mcp',
-            `--header`,
-            `Authorization: Bearer ${mcpSecrets.TENDY_API_KEY}`,
-          ],
+          command: '/workspace/ipc/bin/tendy-mcp-auth',
+          args: [],
+        };
+      }
+
+      if (server === 'ynab' && mcpSecretAvailability.YNAB_API_TOKEN) {
+        mcpServers.ynab = {
+          command: '/workspace/ipc/bin/ynab-mcp-auth',
+          args: [],
         };
       }
 
@@ -239,6 +322,11 @@ function buildVolumeMounts(
   fs.mkdirSync(path.join(groupIpcDir, 'messages'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'tasks'), { recursive: true });
   fs.mkdirSync(path.join(groupIpcDir, 'input'), { recursive: true });
+
+  // Write credential wrapper scripts so containers can fetch tokens
+  // from the proxy on-demand (never stored in env vars or files)
+  writeCredentialWrappers(groupIpcDir);
+
   mounts.push({
     hostPath: groupIpcDir,
     containerPath: '/workspace/ipc',
@@ -285,6 +373,8 @@ function buildVolumeMounts(
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
+  group: RegisteredGroup,
+  isMain: boolean,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
 
@@ -308,14 +398,21 @@ function buildContainerArgs(
     args.push('-e', 'CLAUDE_CODE_OAUTH_TOKEN=placeholder');
   }
 
-  // Pass GitHub token for gh CLI and git operations
-  const envSecrets = readEnvFile(['GH_TOKEN', 'NOTION_API_KEY']);
-  if (envSecrets.GH_TOKEN) {
-    args.push('-e', `GH_TOKEN=${envSecrets.GH_TOKEN}`);
-  }
-  if (envSecrets.NOTION_API_KEY) {
-    args.push('-e', `NOTION_API_KEY=${envSecrets.NOTION_API_KEY}`);
-  }
+  // Credential proxy URL for wrapper scripts (no secrets, just a URL).
+  // Wrapper scripts in /workspace/ipc/bin/ use this to fetch tokens on-demand.
+  const proxyUrl = `http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`;
+  args.push('-e', `NANOCLAW_PROXY_URL=${proxyUrl}`);
+
+  // Prepend /workspace/ipc/bin to PATH so credential wrappers (gh, git
+  // credential helper) shadow the real binaries. Tokens are fetched from
+  // the proxy per-invocation, never stored in env vars or files.
+  args.push(
+    '-e',
+    'PATH=/workspace/ipc/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+  );
+
+  // Git credential helper fetches GitHub token from proxy per-operation
+  args.push('-e', 'GIT_CONFIG_GLOBAL=/workspace/ipc/bin/.gitconfig');
 
   // Runtime-specific args for host gateway resolution
   args.push(...hostGatewayArgs());
@@ -374,7 +471,7 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input.isMain);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName);
+  const containerArgs = buildContainerArgs(mounts, containerName, group, input.isMain);
   applyContainerConfig(containerArgs, group);
 
   logger.debug(

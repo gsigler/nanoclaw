@@ -30,13 +30,42 @@ function detectProxyBindHost(): string {
   // Check /proc filesystem, not env vars — WSL_DISTRO_NAME isn't set under systemd.
   if (fs.existsSync('/proc/sys/fs/binfmt_misc/WSLInterop')) return '127.0.0.1';
 
-  // Bare-metal Linux: bind to the docker0 bridge IP instead of 0.0.0.0
+  // Bare-metal Linux: bind to the docker0 bridge IP instead of 0.0.0.0.
+  // This ensures only containers on the bridge network can reach the proxy,
+  // not arbitrary processes on the LAN.
   const ifaces = os.networkInterfaces();
   const docker0 = ifaces['docker0'];
   if (docker0) {
     const ipv4 = docker0.find((a) => a.family === 'IPv4');
     if (ipv4) return ipv4.address;
   }
+
+  // docker0 not found (custom network, podman, etc.) — try to discover
+  // the default bridge gateway IP via `docker network inspect`.
+  try {
+    const output = execSync(
+      `${CONTAINER_RUNTIME_BIN} network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}'`,
+      { stdio: ['pipe', 'pipe', 'pipe'], encoding: 'utf-8', timeout: 5000 },
+    );
+    const gateway = output.trim();
+    if (gateway && /^\d+\.\d+\.\d+\.\d+$/.test(gateway)) {
+      logger.info(
+        { gateway },
+        'No docker0 interface found; using bridge gateway from docker network inspect',
+      );
+      return gateway;
+    }
+  } catch {
+    // docker network inspect failed — runtime may not be ready yet
+  }
+
+  // Last resort: bind to all interfaces. Log a prominent warning since this
+  // exposes the credential proxy (which injects Anthropic API tokens) to the
+  // entire network, not just containers.
+  logger.warn(
+    'Credential proxy binding to 0.0.0.0 — could not detect a container-only address. ' +
+      'Set CREDENTIAL_PROXY_HOST in .env to restrict to a specific interface.',
+  );
   return '0.0.0.0';
 }
 
